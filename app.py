@@ -5,6 +5,7 @@ import re
 import mysql.connector
 from datetime import datetime
 import json
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.secret_key = '1234'
@@ -16,33 +17,81 @@ db_config = {
     'database': 'contactdb'
 }
 
-KNOWLARITY_SR_API_KEY = '7dee7087-b035-4557-9489-53b943dbfbcc'
-KNOWLARITY_X_API_KEY = 'R3zHw7U5agaREaDVuzBeN6ke5vrY3QXda97pH2PJ'
-KNOWLARITY_K_NUMBER = '+917353950600'
-KNOWLARITY_AGENT_NUMBER = '+917093284780'
-KNOWLARITY_CALLER_ID = '+918048160852'
-KNOWLARITY_CHANNEL = 'Basic'
+# --- SIGNUP ROUTE ---
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    error = None
+    if request.method == 'POST':
+        name = request.form.get('name', '').strip()
+        phone = request.form.get('phone', '').strip()
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        confirm_password = request.form.get('confirm_password', '')
+        if not name or not phone or not username or not password or not confirm_password:
+            error = "All fields are required."
+        elif password != confirm_password:
+            error = "Passwords do not match."
+        else:
+            try:
+                conn = mysql.connector.connect(**db_config)
+                cursor = conn.cursor(dictionary=True)
+                cursor.execute("SELECT id FROM agents WHERE username = %s", (username,))
+                if cursor.fetchone():
+                    error = "Username already exists."
+                else:
+                    password_hash = generate_password_hash(password)
+                    cursor.execute(
+                        "INSERT INTO agents (username, name, phone, password_hash) VALUES (%s, %s, %s, %s)",
+                        (username, name, phone, password_hash)
+                    )
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    return redirect(url_for('login'))
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                error = "Database error: " + str(e)
+    return render_template('signup.html', error=error)
 
-def is_valid_phone_number(number):
-    digits = re.sub(r'\D', '', number)
-    return len(digits) >= 10
-
+# --- LOGIN ROUTE ---
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     error = None
     if request.method == 'POST':
-        agent_number = request.form.get('agent_number', '').strip()
-        if not agent_number or not (agent_number.isdigit() or (agent_number.startswith('+') and agent_number[1:].isdigit())) or len(agent_number.replace('+', '')) < 10:
-            error = "Please enter a valid agent number."
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        if not username or not password:
+            error = "Please enter both username and password."
         else:
-            session['agent_number'] = agent_number
-            return redirect(url_for('index'))
+            try:
+                conn = mysql.connector.connect(**db_config)
+                cursor = conn.cursor(dictionary=True)
+                cursor.execute("SELECT * FROM agents WHERE username = %s", (username,))
+                user = cursor.fetchone()
+                cursor.close()
+                conn.close()
+                if user and check_password_hash(user['password_hash'], password):
+                    session['user_id'] = user['id']
+                    session['username'] = user['username']
+                    session['name'] = user['name']
+                    return redirect(url_for('index'))
+                else:
+                    error = "Invalid username or password."
+            except Exception as e:
+                error = "Database error: " + str(e)
     return render_template('login.html', error=error)
 
 @app.route('/logout')
 def logout():
-    session.pop('agent_number', None)
+    session.clear()
     return redirect(url_for('login'))
+
+# --- REST OF YOUR ORIGINAL CODE (unchanged except session key) ---
+
+def is_valid_phone_number(number):
+    digits = re.sub(r'\D', '', number)
+    return len(digits) >= 10
 
 def decode_cfemail(cfemail):
     r = int(cfemail[:2], 16)
@@ -182,7 +231,6 @@ def store_or_update_contacts_in_mysql(emails, mobiles, landlines, website):
         duplicate = cursor.fetchone()
         if duplicate:
             return "These contacts already exist in the database. No new record added."
-
         cursor.execute("SELECT emails, mobiles, landlines FROM contacts WHERE website = %s AND deleted = FALSE", (website,))
         result = cursor.fetchone()
         if result:
@@ -236,7 +284,7 @@ def fetch_all_contacts():
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    if 'agent_number' not in session:
+    if 'user_id' not in session:
         return redirect(url_for('login'))
     message = ""
     if request.method == 'POST':
@@ -284,28 +332,28 @@ def refresh_contact(sno):
 
 @app.route('/click2call', methods=['POST'])
 def click2call():
-    if 'agent_number' not in session:
-        return jsonify({"success": False, "message": "You must log in with your agent number."}), 401
+    if 'user_id' not in session:
+        return jsonify({"success": False, "message": "You must log in."}), 401
     customer_number = request.json.get('number')
-    agent_number = session['agent_number']
+    agent_number = session['username']
     if not customer_number:
         return jsonify({"success": False, "message": "Customer number is required"})
     customer_number = customer_number.replace(' ', '')
     if not customer_number.startswith('+91'):
         customer_number = '+91' + customer_number
-    api_url = f"https://kpi.knowlarity.com/{KNOWLARITY_CHANNEL}/v1/account/call/makecall"
+    api_url = f"https://kpi.knowlarity.com/Basic/v1/account/call/makecall"
     headers = {
         'Content-Type': 'application/json',
-        'authorization': KNOWLARITY_SR_API_KEY,
-        'x-api-key': KNOWLARITY_X_API_KEY,
-        'channel': KNOWLARITY_CHANNEL,
+        'authorization': '7dee7087-b035-4557-9489-53b943dbfbcc',
+        'x-api-key': 'R3zHw7U5agaREaDVuzBeN6ke5vrY3QXda97pH2PJ',
+        'channel': 'Basic',
         'cache-control': 'no-cache'
     }
     payload = {
-        "k_number": KNOWLARITY_K_NUMBER,
+        "k_number": '+917353950600',
         "agent_number": agent_number,
         "customer_number": customer_number,
-        "caller_id": KNOWLARITY_CALLER_ID
+        "caller_id": '+918048160852'
     }
     try:
         response = requests.post(api_url, json=payload, headers=headers, timeout=30)
@@ -332,12 +380,12 @@ def click2call():
 
 @app.route('/log_activity', methods=['POST'])
 def log_activity():
-    if 'agent_number' not in session:
+    if 'user_id' not in session:
         return jsonify({'success': False, 'message': 'Not logged in'}), 401
     data = request.json
     contact_type = data.get('contact_type')
     contact_value = data.get('contact_value')
-    agent_number = session['agent_number']
+    agent_number = session['username']
     clicked_at = datetime.now()
     try:
         conn = mysql.connector.connect(**db_config)
@@ -355,7 +403,7 @@ def log_activity():
 
 @app.route('/activity')
 def activity():
-    if 'agent_number' not in session:
+    if 'user_id' not in session:
         return redirect(url_for('login'))
     conn = mysql.connector.connect(**db_config)
     cursor = conn.cursor(dictionary=True)
@@ -379,3 +427,4 @@ def internal_error(error):
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
+
